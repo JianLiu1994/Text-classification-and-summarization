@@ -1,6 +1,22 @@
 # Text-classification-and-summarization
+### 1. Python environment (use anaconda3 to install the environment):
 
-### Text classification:
+1. create -n 8735 python=3.6
+2. conda activate 8735
+3. conda install pandas
+4. pip install newspaper3k or conda install newspaper3k (don't need to install if you already have the data)
+5. pip install nltk
+6. pip install sklearn matplotlib seaborn
+
+### 2. Create dataset.csv:
+
+```
+cd NewsAggregatorDataset/workdir
+python combine.py
+cp dataset.csv ../
+```
+
+### 3. Text classification:
 Classifying the news articles into 4 categories namely Health, Business, Entertainment, Technology using the following ML models:  
 1. Logistic regression
 2. Support Vector Machine
