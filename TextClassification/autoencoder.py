@@ -1,3 +1,4 @@
+from doctest import Example
 from genericpath import samefile
 import os
 import torch
@@ -6,7 +7,6 @@ import torch.optim as optim
 import torch.nn.functional as F
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
-from torchvision.datasets import MNIST
 from torchvision.transforms import ToTensor
 import pytorch_lightning as pl
 import pandas as pd
@@ -76,57 +76,45 @@ class LitAutoEncoder(pl.LightningModule):
         self.log('test_loss', loss, on_epoch=True)
         return loss
 
+    # ---------------------
+    # training setup
+    # ---------------------
     def configure_optimizers(self):
+        # self.hparams available because we called self.save_hyperparameters()
         optimizer = optim.AdamW(self.parameters(), lr=0.001)
-        return optimizer
 
-def read_data():
-    df = pd.read_pickle('../Data_collection/dataset_filtered.pickle')
-    label_encoder = preprocessing.LabelEncoder()
-    df['category']= label_encoder.fit_transform(df['category']) 
 
-    df0 = df[df.category==0]
-    df1 = df[df.category==1]
-    df2 = df[df.category==2]
-    df3 = df[df.category==3]
+        scheduler = ReduceLROnPlateau(optimizer, mode='min')
+        metric_to_track = 'valid_loss'
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {
+                'scheduler': scheduler,
+                'monitor': metric_to_track,
+                'strict': False
+            },
+        }
 
-    samples = df.category.value_counts().tolist()
-    sample_count = np.min(np.array(samples))
-    df0 = resample(df0, replace=True, n_samples=sample_count, random_state=123)
-    df1 = resample(df1, replace=True, n_samples=sample_count, random_state=123)
-    df2 = resample(df2, replace=True, n_samples=sample_count, random_state=123)
-    df3 = resample(df3, replace=True, n_samples=sample_count, random_state=123)
-    df_sampled = pd.concat([df0,df1,df2,df3])
-    return df_sampled
+    def configure_callbacks(self):
+        early_stop = pl.callbacks.EarlyStopping(monitor="valid_loss", mode="min", patience=10)
+        checkpoint = pl.callbacks.ModelCheckpoint(monitor="valid_loss", save_top_k=5,
+                                                  dirpath='ckpt',
+                                                  filename='Autoencoder-{epoch:02d}-{valid_loss:.5f}')
+        return [early_stop, checkpoint]
 
-def embed(training_set, val_set, test_set):
 
-    training_features_npy = 'training_features_400.npy'
-    testing_features_npy = 'testing_features_400.npy'
-    val_features_npy = 'val_features_400.npy'
+def read_embed(datadir):
+
+    training_features_npy = datadir + '/training_features_umap_400.npy'
+    testing_features_npy = datadir + '/testing_features_umap_400.npy'
+    val_features_npy = datadir + '/val_features_umap_400.npy'
 
     if os.path.exists(training_features_npy):
         training_embedding = np.load(training_features_npy)
         testing_embedding = np.load(testing_features_npy)
         val_embedding = np.load(val_features_npy)
     else:
-        tfidvectorizer = TfidfVectorizer(min_df=2, 
-                                        ngram_range=(2,2),
-                                        smooth_idf=True,
-                                        use_idf=True)
-
-        tfid_train_features = tfidvectorizer.fit_transform(training_set)
-        tfid_val_features = tfidvectorizer.transform(val_set)
-        tfid_test_features = tfidvectorizer.transform(test_set)
-
-        reducer = umap.UMAP(random_state=42, n_components=400)
-        training_embedding = reducer.fit_transform(tfid_train_features)
-        val_embedding = reducer.transform(tfid_val_features)
-        testing_embedding = reducer.transform(tfid_test_features)
-
-        np.save(training_features_npy, training_embedding)
-        np.save(val_features_npy, val_embedding)
-        np.save(testing_features_npy, testing_embedding)
+        raise Exception("Please read split_data.py first to generate data!")
 
     return training_embedding, val_embedding, testing_embedding
 
@@ -138,20 +126,22 @@ def cli_main():
     parser = ArgumentParser()
     parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--num_dataloader_workers', type=int, default=16)
+    parser.add_argument('--datadir', type=str, default='../data')
     parser = pl.Trainer.add_argparse_args(parser)
     args = parser.parse_args()
+    
 
     encoder = nn.Sequential(nn.Linear(400, 64), nn.ReLU(), nn.Linear(64, 10))
     decoder = nn.Sequential(nn.Linear(10, 64), nn.ReLU(), nn.Linear(64, 400))
     ae = LitAutoEncoder(encoder, decoder)
 
-    df = read_data()
+    # df = read_data()
 
-    training_set, test_set, training_labels, test_labels = train_test_split(df["filtered_content"], df["category"], test_size=0.33)
+    # training_set, test_set, training_labels, test_labels = train_test_split(df["filtered_content"], df["category"], test_size=0.33)
 
-    training_set, val_set, training_labels, val_labels = train_test_split(training_set, training_labels, test_size=0.2)
+    # training_set, val_set, training_labels, val_labels = train_test_split(training_set, training_labels, test_size=0.2)
 
-    train_embed, val_embed, test_embed = embed(training_set, val_set, test_set)    
+    train_embed, val_embed, test_embed = read_embed(args.datadir)    
 
     ##parameters for loading models for each target
     train_params = {'batch_size': 16,
@@ -183,6 +173,7 @@ def cli_main():
     # ------------
     # training
     # ------------
+    
     tb_logger = pl_loggers.TensorBoardLogger(save_dir="logs/")
 
     trainer = pl.Trainer.from_argparse_args(args, logger=tb_logger)
