@@ -16,7 +16,6 @@ from sklearn.model_selection import train_test_split
 from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
 import seaborn as sns
 from matplotlib import pyplot as plt
-import umap
 import numpy as np
 from pytorch_lightning.loggers.neptune import NeptuneLogger
 from sklearn.model_selection import train_test_split
@@ -24,6 +23,9 @@ from pytorch_lightning import loggers as pl_loggers
 from tqdm import tqdm
 from argparse import ArgumentParser
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from sklearn.cluster import KMeans
+from sklearn import metrics, neighbors
+import pickle
 from sklearn.metrics import classification_report
 
 class MyDataset(Dataset):
@@ -32,6 +34,7 @@ class MyDataset(Dataset):
         self.transform = transform
 
     def __getitem__(self, index):
+        #print(self.data[index, :].shape)
         x = self.data[index, :][:, np.newaxis]
         # print(x.shape)
         if self.transform:
@@ -42,11 +45,12 @@ class MyDataset(Dataset):
         return self.data.shape[0]
 
 class LitAutoEncoder(pl.LightningModule):
-    def __init__(self, encoder, decoder, outdir):
+    def __init__(self, encoder, decoder, outdir, test_labels):
         super().__init__()
         self.encoder = encoder
         self.decoder = decoder
         self.outdir = outdir
+        self.test_labels = test_labels
 
     def training_step(self, batch, batch_idx):
         x = batch
@@ -76,7 +80,21 @@ class LitAutoEncoder(pl.LightningModule):
         loss = F.mse_loss(x_hat, x)
         # Include extra logging here
         self.log('test_loss', loss, on_epoch=True)
-        return loss
+        return {'test_loss' : loss, 'latents': z.cpu().detach().numpy().astype(np.float32)}
+
+    def test_epoch_end(self, outputs):
+        test_embeddings = []
+        for output in outputs:
+            embedding = output['latents']
+            test_embeddings += [embedding]
+        test_embeddings = np.squeeze(np.array(test_embeddings),1)
+        print(test_embeddings.shape)
+
+        km_model = KMeans(n_clusters=4, n_init=50, max_iter=1000)
+        km_model.fit(test_embeddings)
+    
+        print(classification_report(self.test_labels, km_model.labels_, target_names=['business', 'entertainment', 'health', 'science and technology']))
+        
 
     # ---------------------
     # training setup
@@ -105,16 +123,16 @@ class LitAutoEncoder(pl.LightningModule):
 
 def read_embed(datadir):
 
-    training_features_npy = datadir + '/training_features_umap_400.npy'
-    testing_features_npy = datadir + '/testing_features_umap_400.npy'
-    val_features_npy = datadir + '/val_features_umap_400.npy'
+    training_features_pkl = datadir + '/training_features_umap_3000.pkl'
+    testing_features_pkl = datadir + '/test_features_umap_3000.pkl'
+    val_features_pkl = datadir + '/val_features_umap_3000.pkl'
 
-    if os.path.exists(training_features_npy):
-        training_embedding = np.load(training_features_npy)
-        testing_embedding = np.load(testing_features_npy)
-        val_embedding = np.load(val_features_npy)
-    else:
+    if not os.path.exists(training_features_pkl):
         raise Exception("Please read split_data.py first to generate data!")
+
+    training_embedding = pickle.load(open(training_features_pkl, "rb" ) )
+    val_embedding = pickle.load(open(val_features_pkl, "rb" ) )
+    testing_embedding = pickle.load(open(testing_features_pkl, "rb" ) )
 
     return training_embedding, val_embedding, testing_embedding
 
@@ -127,37 +145,32 @@ def cli_main():
     parser.add_argument('--batch_size', default=16, type=int)
     parser.add_argument('--num_dataloader_workers', type=int, default=16)
     parser.add_argument('--datadir', type=str, default='../data')
-    parser.add_argument('--outdir', type=str, default='')
+    parser.add_argument('--outdir', type=str, default='.')
+    parser.add_argument('--ckpt_name', type=str, default="")
     parser = pl.Trainer.add_argparse_args(parser)
     args = parser.parse_args()
-    
-
-    encoder = nn.Sequential(nn.Linear(400, 256), nn.ReLU(), nn.Linear(256, 128), nn.ReLU(), nn.Linear(128, 64), nn.ReLU(), nn.Linear(64, 10))
-    decoder = nn.Sequential(nn.Linear(10, 64), nn.ReLU(), nn.Linear(64, 128), nn.ReLU(), nn.Linear(128, 256), nn.ReLU(), nn.Linear(256, 400))
-    ae = LitAutoEncoder(encoder, decoder, args.outdir)
-
-    # df = read_data()
-
-    # training_set, test_set, training_labels, test_labels = train_test_split(df["filtered_content"], df["category"], test_size=0.33)
-
-    # training_set, val_set, training_labels, val_labels = train_test_split(training_set, training_labels, test_size=0.2)
 
     train_embed, val_embed, test_embed = read_embed(args.datadir)    
+    test_labels = np.load(args.datadir + '/test_labels.npy')
 
     ##parameters for loading models for each target
-    train_params = {'batch_size': 16,
+    train_params = {'batch_size': 64,
 
                     'shuffle': True,
 
                     'num_workers': 16}
 
-    val_params = {'batch_size': 16,
+    val_params = {'batch_size': 64,
 
                     'num_workers': 16}
     
-    test_params = {'batch_size': 16,
+    test_params = {'batch_size': 1,
 
                     'num_workers': 16}
+
+    print(train_embed.shape)
+    print(val_embed.shape)
+    print(test_embed.shape)
 
     train_loader = DataLoader(MyDataset(train_embed, ToTensor()), **train_params)
 
@@ -165,13 +178,20 @@ def cli_main():
 
     test_loader = DataLoader(MyDataset(test_embed, ToTensor()), **test_params)
 
+    encoder = nn.Sequential(nn.Linear(3000, 2048), nn.ReLU(), nn.Linear(2048, 1024), nn.ReLU(), nn.Linear(1024, 32))
+    decoder = nn.Sequential(nn.Linear(32, 1024), nn.ReLU(), nn.Linear(1024, 2048), nn.ReLU(), nn.Linear(2048, 3000))
+    ae = LitAutoEncoder(encoder, decoder, args.outdir, test_labels)
+
+
     # ------------
     # training
     # ------------
-    
+
     tb_logger = pl_loggers.TensorBoardLogger(save_dir=args.outdir + '/logs/')
 
-    trainer = pl.Trainer.from_argparse_args(args, logger=tb_logger)
+    trainer = pl.Trainer.from_argparse_args(args, logger=tb_logger, resume_from_checkpoint=args.ckpt_name, max_epochs=399)
+
+    # trainer.resume_from_checkpoint = args.ckpt_name if os.path.exists(args.ckpt_name) else None
 
     trainer.fit(ae, train_loader, val_loader)
 
